@@ -1,7 +1,7 @@
 <!-- file: README.md -->
-<!-- version: 3.6.1 -->
+<!-- version: 3.7.0 -->
 <!-- guid: c68a62ce-72d1-45cc-a6c8-d3dfc41d0e34 -->
-<!-- last-edited: 2026-05-25 -->
+<!-- last-edited: 2026-07-28 -->
 
 # cockroach-rollout-agent
 
@@ -87,6 +87,9 @@ Code Quality is enabled for the repository or account during the public preview.
 | `CROACH_ROLLOUT_AUDIT_LOG` | `/var/log/cockroach-rollout-agent/audit.log` |
 | `CROACH_ROLLOUT_DATABASE_URL` | unset |
 | `CROACH_ROLLOUT_SCHEMA` | `cockroach_rollout` |
+| `CROACH_ROLLOUT_SSL_ROOT_CERT` | unset |
+| `CROACH_ROLLOUT_SSL_CLIENT_CERT` | unset |
+| `CROACH_ROLLOUT_SSL_CLIENT_KEY` | unset |
 | `CROACH_ROLLOUT_NODE_ID` | hostname plus architecture |
 | `CROACH_ROLLOUT_CURRENT_VERSION` | unset |
 | `CROACH_ROLLOUT_TARGET_VERSION` | unset |
@@ -180,6 +183,29 @@ WHERE is_live;
 This means the project does not need a separate Raft library or mDNS trust
 model. CockroachDB already provides consensus for the SQL lease and rollout
 state.
+
+### TLS material
+
+The `postgres` connection-string parser only understands `sslmode`; it rejects
+libpq's `sslrootcert`, `sslcert`, and `sslkey` with `invalid connection string`.
+Supply those paths through `CROACH_ROLLOUT_SSL_ROOT_CERT`,
+`CROACH_ROLLOUT_SSL_CLIENT_CERT`, and `CROACH_ROLLOUT_SSL_CLIENT_KEY` instead.
+`CROACH_ROLLOUT_SSL_ROOT_CERT` is required against a cluster using a private CA,
+which is the normal CockroachDB deployment; without it the handshake fails
+because only the system trust store is consulted.
+
+Client certificate authentication needs a **PKCS#8** key. `cockroach cert
+create-client` emits PKCS#1, so convert it once:
+
+```bash
+openssl pkcs8 -topk8 -nocrypt \
+  -in certs/client.rollout.key \
+  -out certs/client.rollout.pk8
+```
+
+Only `sslmode=disable`, `prefer`, and `require` are accepted; `verify-ca` and
+`verify-full` are not recognised by the parser. Chain and hostname verification
+still happen through the TLS connector once a root certificate is configured.
 
 Use a secure CockroachDB SQL URL in `CROACH_ROLLOUT_DATABASE_URL`, for example
 with `sslmode=require` or the certificate parameters your cluster already uses.

@@ -1,7 +1,7 @@
 <!-- file: docs/deploy.md -->
-<!-- version: 1.0.0 -->
+<!-- version: 1.1.0 -->
 <!-- guid: 41eb3d6e-f70e-431d-8f3e-33d1ca5e45c1 -->
-<!-- last-edited: 2026-05-26 -->
+<!-- last-edited: 2026-07-28 -->
 
 # Deployment
 
@@ -53,6 +53,33 @@ sudo editor /etc/cockroach-rollout-agent.env
 ```
 
 Set `CROACH_ROLLOUT_DATABASE_URL` to a secure CockroachDB SQL URL.
+
+For a cluster with a private CA (the normal case), also set the TLS paths. They
+cannot travel in the URL — the `postgres` parser rejects `sslrootcert`,
+`sslcert`, and `sslkey`:
+
+```bash
+CROACH_ROLLOUT_DATABASE_URL=postgresql://rollout@<node-ip>:26257/defaultdb?sslmode=require
+CROACH_ROLLOUT_SSL_ROOT_CERT=/etc/cockroach-rollout-agent/certs/ca.crt
+CROACH_ROLLOUT_SSL_CLIENT_CERT=/etc/cockroach-rollout-agent/certs/client.rollout.crt
+CROACH_ROLLOUT_SSL_CLIENT_KEY=/etc/cockroach-rollout-agent/certs/client.rollout.pk8
+```
+
+Mint the client certificate and convert the key to PKCS#8, which is the only
+format the TLS layer accepts:
+
+```bash
+cockroach cert create-client rollout --certs-dir=certs --ca-key=my-safe-directory/ca.key
+openssl pkcs8 -topk8 -nocrypt -in certs/client.rollout.key -out certs/client.rollout.pk8
+```
+
+Point each agent at its **own** node's SQL address so reporting status never
+depends on a peer being up.
+
+`CROACH_ROLLOUT_SERVICE` must name the CockroachDB unit **on that host**. The
+name is not always the same across a cluster, and the shipped
+`examples/cockroach-rollout-agent.service` and `.sudoers` both hardcode
+`cockroachdb.service` — substitute the real unit name in all three files.
 
 ## 4. Initialize Coordination Tables
 
