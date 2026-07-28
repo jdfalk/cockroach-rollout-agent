@@ -1,6 +1,7 @@
 // file: src/main.rs
-// version: 2.2.0
+// version: 2.3.0
 // guid: d16be11a-b10c-4d2e-853f-d4a1c0a3c617
+// last-edited: 2026-07-28
 
 use std::ffi::OsStr;
 use std::fs;
@@ -11,7 +12,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
-use native_tls::TlsConnector;
+use native_tls::{Certificate, Identity, TlsConnector};
 use postgres::Client;
 use postgres_native_tls::MakeTlsConnector;
 use regex::Regex;
@@ -92,6 +93,22 @@ struct Cli {
 
     #[arg(long, env = "CROACH_ROLLOUT_DATABASE_URL")]
     database_url: Option<String>,
+
+    /// PEM CA bundle used to verify the CockroachDB server certificate.
+    /// Required for clusters that use a private CA, which is the normal
+    /// CockroachDB deployment. The `postgres` connection string parser rejects
+    /// libpq's `sslrootcert`, so the path is supplied here instead.
+    #[arg(long, env = "CROACH_ROLLOUT_SSL_ROOT_CERT")]
+    ssl_root_cert: Option<PathBuf>,
+
+    /// PEM client certificate presented for CockroachDB certificate
+    /// authentication. Must be set together with `--ssl-client-key`.
+    #[arg(long, env = "CROACH_ROLLOUT_SSL_CLIENT_CERT")]
+    ssl_client_cert: Option<PathBuf>,
+
+    /// PEM private key matching `--ssl-client-cert`.
+    #[arg(long, env = "CROACH_ROLLOUT_SSL_CLIENT_KEY")]
+    ssl_client_key: Option<PathBuf>,
 
     #[arg(long, env = "CROACH_ROLLOUT_SCHEMA", default_value = DEFAULT_SCHEMA)]
     schema: String,
@@ -759,7 +776,61 @@ fn db_client(cli: &Cli) -> Result<Client, AppError> {
     let database_url = cli.database_url.as_deref().ok_or_else(|| {
         AppError::Message("--database-url or CROACH_ROLLOUT_DATABASE_URL is required".to_string())
     })?;
-    let tls = TlsConnector::builder()
+    let mut builder = TlsConnector::builder();
+
+    if let Some(path) = cli.ssl_root_cert.as_deref() {
+        let pem = fs::read(path).map_err(|error| {
+            AppError::Message(format!("failed to read {}: {error}", path.display()))
+        })?;
+        let ca = Certificate::from_pem(&pem).map_err(|error| {
+            AppError::Message(format!("failed to parse {}: {error}", path.display()))
+        })?;
+        builder.add_root_certificate(ca);
+    }
+
+    match (
+        cli.ssl_client_cert.as_deref(),
+        cli.ssl_client_key.as_deref(),
+    ) {
+        (Some(cert_path), Some(key_path)) => {
+            let cert = fs::read(cert_path).map_err(|error| {
+                AppError::Message(format!("failed to read {}: {error}", cert_path.display()))
+            })?;
+            let key = fs::read(key_path).map_err(|error| {
+                AppError::Message(format!("failed to read {}: {error}", key_path.display()))
+            })?;
+            // `cockroach cert create-client` writes a PKCS#1 key
+            // ("BEGIN RSA PRIVATE KEY"), but native-tls only accepts PKCS#8.
+            // Point at the conversion instead of failing with a bare parse error.
+            let identity = Identity::from_pkcs8(&cert, &key).map_err(|error| {
+                let hint = if key.starts_with(b"-----BEGIN RSA PRIVATE KEY-----") {
+                    format!(
+                        "; {} is a PKCS#1 key, convert it with: \
+                         openssl pkcs8 -topk8 -nocrypt -in {} -out {}.pk8",
+                        key_path.display(),
+                        key_path.display(),
+                        key_path.display()
+                    )
+                } else {
+                    String::new()
+                };
+                AppError::Message(format!(
+                    "failed to load client identity from {} and {}: {error}{hint}",
+                    cert_path.display(),
+                    key_path.display()
+                ))
+            })?;
+            builder.identity(identity);
+        }
+        (None, None) => {}
+        _ => {
+            return Err(AppError::Message(
+                "--ssl-client-cert and --ssl-client-key must be set together".to_string(),
+            ));
+        }
+    }
+
+    let tls = builder
         .build()
         .map_err(|error| AppError::Message(error.to_string()))?;
     Ok(Client::connect(database_url, MakeTlsConnector::new(tls))?)
